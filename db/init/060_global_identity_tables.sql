@@ -1,0 +1,2 @@
+-- Reserved for future global identity helper tables or views
+-- (intentionally empty for now)
