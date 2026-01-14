@@ -1,7 +1,5 @@
 # MDM (Master Data Management) Pipeline
 
-[![Ask DeepWiki](https://devin.ai/assets/askdeepwiki.png)](https://deepwiki.com/ahamril2265/mdm-project)
-
 This repository contains a complete, end-to-end Master Data Management (MDM) pipeline built with Python, PostgreSQL, and Minio. The project demonstrates a phased approach to ingesting customer data from disparate sources, cleaning it, resolving identities, and creating a single, consolidated "golden record" for each customer.
 
 The pipeline processes mock customer data from three systems:
@@ -129,3 +127,4 @@ The entire pipeline can be executed with a single command. The script handles st
     ```
 
 Upon completion, you can connect to the PostgreSQL database on port `5433` to explore the `raw`, `staging`, `identity`, and `gold` schemas. You can also access the Minio console at `http://localhost:9001` to view the raw ingested files.
+
