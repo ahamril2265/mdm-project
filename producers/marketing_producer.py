@@ -47,6 +47,6 @@ def _upload(client, ts, records):
 if __name__ == "__main__":
     run(
         start_ts=datetime.utcnow(),
-        hours=6,
-        total_records=300
+        hours=24,
+        total_records=3000
     )

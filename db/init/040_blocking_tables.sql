@@ -4,7 +4,6 @@ CREATE TABLE IF NOT EXISTS staging.identity_match_candidates_blocked (
     left_email TEXT,
     left_phone TEXT,
     left_name TEXT,
-
     right_source_system TEXT,
     right_record_id TEXT,
     right_email TEXT,

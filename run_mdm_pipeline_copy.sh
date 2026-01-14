@@ -28,13 +28,13 @@ echo_step () {
 # -----------------------
 # PHASE 0 — INFRA & SCHEMA
 # -----------------------
-echo_step "Phase 0 — Infrastructure & Base Schema"
+#echo_step "Phase 0 — Infrastructure & Base Schema"
 
-docker compose down -v
-docker compose up -d
+#docker compose down -v
+#docker compose up -d
 
-echo "Waiting for Postgres..."
-sleep 5
+#echo "Waiting for Postgres..."
+#sleep 5
 
 echo "Applying database initialization scripts..."
 
@@ -43,7 +43,7 @@ for file in db/init/*.sql; do
   psql_exec < "$file"
 done
 
-echo "Phase 0 completed ✅"
+#echo "Phase 0 completed ✅"
 
 # -----------------------
 # PHASE 1 — PRODUCERS
@@ -205,3 +205,62 @@ ORDER BY record_count DESC;
 SQL
 
 echo "Phase 7 completed ✅"
+
+# -----------------------
+# PHASE 8 — GOLDEN HISTORY
+# -----------------------
+echo_step "Phase 8 — Golden Record History (SCD2)"
+
+python gold/run_golden_history.py
+
+psql_exec <<'SQL'
+SELECT COUNT(*) FROM gold.dim_customers_history;
+SELECT COUNT(*) FROM gold.dim_customers_history WHERE is_current = true;
+SQL
+
+echo "Phase 8 completed ✅"
+
+# -----------------------
+# PHASE 9 — Golden Change Events (CDC)
+# -----------------------
+echo_step "Phase 9 — Golden Change Events (CDC)"
+
+python gold/run_golden_cdc.py
+
+psql_exec <<'SQL'
+SELECT COUNT(*) FROM gold.customer_change_events;
+SELECT change_type, COUNT(*) FROM gold.customer_change_events GROUP BY change_type;
+SELECT * FROM gold.customer_change_events ORDER BY changed_at DESC LIMIT 5;
+SQL
+
+echo "Phase 9A completed ✅"
+
+# -----------------------
+# PHASE 9B — STEWARD OVERRIDES
+# -----------------------
+echo_step "Phase 9B — Steward Overrides"
+
+python gold/run_steward_overrides.py
+
+psql_exec <<'SQL'
+SELECT COUNT(*) AS active_overrides
+FROM gold.customer_steward_overrides
+WHERE is_active = true;
+SQL
+
+echo "Phase 9B completed ✅"
+
+# -----------------------
+# PHASE 10 — DATA QUALKLITY & GOVERNANCE
+# -----------------------
+echo_step "Phase 10 — Data Quality & Governance"
+
+apply_sql db/init/010A_gold_match_confidence_metrics.sql
+apply_sql db/init/010B_gold_steward_override_metrics.sql
+apply_sql db/init/010C_gold_customer_attribute_conflicts.sql
+apply_sql db/init/010D_gold_steward_review_queue.sql
+
+python gold/run_conflict_detection.py
+python gold/run_quality_metrics.py
+
+echo "Phase 10 completed ✅"

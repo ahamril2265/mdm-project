@@ -2,7 +2,7 @@
 set -euo pipefail
 
 echo "======================================"
-echo "MDM PIPELINE : PHASE 0 → PHASE 5"
+echo "MDM PIPELINE : PHASE 0 → PHASE 10"
 echo "======================================"
 
 # -----------------------
@@ -16,7 +16,26 @@ DB_USER="mdm_user"
 # HELPERS
 # -----------------------
 psql_exec () {
-  docker exec -i "$POSTGRES_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1
+  docker exec -i "$POSTGRES_CONTAINER" \
+    psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1
+}
+
+apply_sql () {
+  local file="$1"
+  echo "→ Applying $file"
+  psql_exec < "$file"
+}
+
+apply_sql () {
+  local file="$1"
+
+  if [[ ! -f "$file" ]]; then
+    echo "❌ SQL file not found: $file"
+    exit 1
+  fi
+
+  echo "→ Applying $file"
+  psql_exec < "$file"
 }
 
 echo_step () {
@@ -28,17 +47,19 @@ echo_step () {
 # -----------------------
 # PHASE 0 — INFRA & SCHEMA
 # -----------------------
-#echo_step "Phase 0 — Infrastructure & Base Schema"
+echo_step "Phase 0 — Infrastructure & Base Schema"
 
-#docker compose down -v
-#docker compose up -d
+docker compose down -v
+docker compose up -d
 
-#echo "Waiting for Postgres..."
-#sleep 5
+echo "Waiting for Postgres..."
+sleep 5
 
-#psql_exec < db/init/001_init.sql
+for file in db/init/*.sql; do
+  apply_sql "$file"
+done
 
-#echo "Phase 0 completed ✅"
+echo "Phase 0 completed ✅"
 
 # -----------------------
 # PHASE 1 — PRODUCERS
@@ -99,38 +120,7 @@ echo "Phase 4 completed ✅"
 # -----------------------
 echo_step "Phase 4.5 — Blocking Candidates"
 
-psql_exec <<'SQL'
-DROP TABLE IF EXISTS staging.identity_match_candidates_blocked;
-
-CREATE TABLE staging.identity_match_candidates_blocked AS
-SELECT
-    a.source_system        AS left_source_system,
-    a.source_record_id     AS left_record_id,
-    a.normalized_email     AS left_email,
-    a.normalized_phone     AS left_phone,
-    a.normalized_name      AS left_name,
-
-    b.source_system        AS right_source_system,
-    b.source_record_id     AS right_record_id,
-    b.normalized_email     AS right_email,
-    b.normalized_phone     AS right_phone,
-    b.normalized_name      AS right_name
-FROM staging.identity_inputs a
-JOIN staging.identity_inputs b
-  ON a.source_system <> b.source_system
- AND (
-        (a.normalized_email IS NOT NULL AND a.normalized_email = b.normalized_email)
-     OR (a.normalized_phone IS NOT NULL AND a.normalized_phone = b.normalized_phone)
-    )
- -- prevent mirrored duplicates
- AND a.source_record_id < b.source_record_id;
-
-CREATE INDEX idx_blocked_left
-  ON staging.identity_match_candidates_blocked (left_source_system, left_record_id);
-
-CREATE INDEX idx_blocked_right
-  ON staging.identity_match_candidates_blocked (right_source_system, right_record_id);
-SQL
+apply_sql db/init/040_blocking_tables.sql
 
 psql_exec <<'SQL'
 SELECT COUNT(*) FROM staging.identity_match_candidates_blocked;
@@ -153,30 +143,15 @@ SQL
 
 echo "Phase 5 completed ✅"
 
-echo
-echo "======================================"
-echo "MDM PIPELINE COMPLETED SUCCESSFULLY 🎉"
-echo "======================================"
-
 # -----------------------
-# PHASE 6 — IDENTITY RESOLUTION (GLOBAL CUSTOMER ID)
+# PHASE 6 — IDENTITY RESOLUTION
 # -----------------------
 echo_step "Phase 6 — Global Customer ID Resolution"
 
 python identity/run_identity_resolution.py
 
 psql_exec <<'SQL'
-SELECT COUNT(*) AS total_identity_mappings
-FROM identity.customer_identity_map;
-SQL
-
-psql_exec <<'SQL'
-SELECT global_customer_id, COUNT(*) AS linked_records
-FROM identity.customer_identity_map
-GROUP BY global_customer_id
-HAVING COUNT(*) > 1
-ORDER BY linked_records DESC
-LIMIT 5;
+SELECT COUNT(*) FROM identity.customer_identity_map;
 SQL
 
 echo "Phase 6 completed ✅"
@@ -190,13 +165,70 @@ python gold/run_golden_customers.py
 
 psql_exec <<'SQL'
 SELECT COUNT(*) FROM gold.dim_customers;
-
-SELECT
-  record_count,
-  COUNT(*) AS customers
-FROM gold.dim_customers
-GROUP BY record_count
-ORDER BY record_count DESC;
 SQL
 
 echo "Phase 7 completed ✅"
+
+# -----------------------
+# PHASE 8 — GOLDEN HISTORY (SCD2)
+# -----------------------
+echo_step "Phase 8 — Golden Record History (SCD2)"
+
+python gold/run_golden_history.py
+
+psql_exec <<'SQL'
+SELECT COUNT(*) FROM gold.dim_customers_history;
+SELECT COUNT(*) FROM gold.dim_customers_history WHERE is_current = true;
+SQL
+
+echo "Phase 8 completed ✅"
+
+# -----------------------
+# PHASE 9A — CDC
+# -----------------------
+echo_step "Phase 9A — Golden Change Events (CDC)"
+
+python gold/run_golden_cdc.py
+
+psql_exec <<'SQL'
+SELECT change_type, COUNT(*) 
+FROM gold.customer_change_events 
+GROUP BY change_type;
+SQL
+
+echo "Phase 9A completed ✅"
+
+# -----------------------
+# PHASE 9B — STEWARD OVERRIDES
+# -----------------------
+echo_step "Phase 9B — Steward Overrides"
+
+python gold/run_steward_overrides.py
+
+psql_exec <<'SQL'
+SELECT COUNT(*) 
+FROM gold.customer_steward_overrides 
+WHERE is_active = true;
+SQL
+
+echo "Phase 9B completed ✅"
+
+# -----------------------
+# PHASE 10 — DATA QUALITY & GOVERNANCE
+# -----------------------
+echo_step "Phase 10 — Data Quality & Governance"
+
+python gold/run_conflict_detection.py
+python gold/run_quality_metrics.py
+
+psql_exec <<'SQL'
+SELECT * FROM gold.match_confidence_metrics ORDER BY metric_date DESC;
+SELECT COUNT(*) FROM gold.steward_review_queue;
+SQL
+
+echo "Phase 10 completed ✅"
+
+echo
+echo "======================================"
+echo "MDM PIPELINE COMPLETED SUCCESSFULLY 🎉"
+echo "======================================"
